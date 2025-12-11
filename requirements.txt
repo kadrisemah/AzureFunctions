@@ -1,0 +1,9 @@
+azure-functions
+pandas==2.0.3
+numpy==1.24.3
+sqlalchemy==2.0.19
+pyodbc==4.0.39
+catboost==1.2.2
+scikit-learn==1.3.0
+matplotlib==3.7.2
+python-dateutil==2.8.2

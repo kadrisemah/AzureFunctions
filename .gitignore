@@ -1,0 +1,46 @@
+# Azure Functions
+local.settings.json
+.python_packages/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+bin/
+obj/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Azure
+.azure/
+
+# Temporary files
+*.tmp
+*.temp
+.azurite/
+
+# Azurite Storage Emulator
+__azurite_db_*.json
+__blobstorage__/
+AzuriteConfig
+
+# CatBoost Training Logs
+catboost_info/
+*.cbm
