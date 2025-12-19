@@ -1,6 +1,6 @@
 # Azure Functions - ML Pipelines
 
-This project contains two separate ML pipelines for lead scoring and prediction, organized into independent subfolders.
+This project contains three separate ML pipelines covering the complete customer journey, organized into independent subfolders.
 
 ## 📁 Project Structure
 
@@ -20,7 +20,14 @@ azure_functions_clean/
 │   ├── host.json
 │   ├── requirements.txt
 │   ├── local.settings.json.template
-│   ├── SQLSAL 1.ipynb             # Original notebook (reference)
+│   └── README.md
+│
+├── client_conversion/              # Client Conversion Prediction Pipeline
+│   ├── client_conversion_data_preparation/  # ETL with NLP processing
+│   ├── client_conversion_model_training/    # CatBoost + Optuna optimization
+│   ├── host.json
+│   ├── requirements.txt
+│   ├── local.settings.json.template
 │   └── README.md
 │
 ├── .git/                           # Git repository
@@ -52,19 +59,30 @@ cp local.settings.json.template local.settings.json
 func start
 ```
 
+### Client Conversion Pipeline
+
+```bash
+cd client_conversion
+pip install -r requirements.txt
+cp local.settings.json.template local.settings.json
+# Edit local.settings.json with credentials
+func start
+```
+
 ---
 
 ## 📋 Pipeline Comparison
 
-| Feature | Top-Up | SQL/SAL |
-|---------|--------|---------|
-| **Purpose** | Predict client top-up probability | Score SQL/SAL prospects |
-| **Data Sources** | HubSpot deals & contacts | HubSpot contacts, meetings, calls |
-| **ML Model** | CatBoost Classifier | CatBoost + Optuna optimization |
-| **Special Features** | Monthly panel data | NLP clustering, 60+ features |
-| **Schedule** | 6:00 AM & 6:30 AM | 8:00 AM & 8:30 AM |
-| **Duration** | ~30 min total | ~45-60 min total |
-| **Output Rows** | ~50,000 training | ~10,000-20,000 training |
+| Feature | Top-Up | SQL/SAL | Client Conversion |
+|---------|--------|---------|-------------------|
+| **Purpose** | Predict client top-up probability | Score SQL/SAL prospects | Predict SAL→Client conversion |
+| **Customer Stage** | Existing clients | Early funnel (SQL→SAL) | Late funnel (SAL→Client) |
+| **Data Sources** | HubSpot deals & contacts | HubSpot contacts, meetings, calls | HubSpot contacts, meetings, calls |
+| **ML Model** | CatBoost Classifier | CatBoost + Optuna | CatBoost + Optuna |
+| **Special Features** | Monthly panel data | NLP clustering, 60+ features | NLP clustering, 290+ features |
+| **Schedule** | 6:00 AM & 6:30 AM | 8:00 AM & 8:30 AM | 8:00 AM & 8:30 AM |
+| **Duration** | ~30 min total | ~45-60 min total | ~40-60 min total |
+| **Output Rows** | ~50,000 training | ~10,000-20,000 training | ~2,800 training |
 
 ---
 
@@ -97,6 +115,10 @@ npm install -g azurite
 - **Data Preparation:** 1st of month, 8:00 AM UTC (`0 0 8 1 * *`)
 - **Model Training:** 1st of month, 8:30 AM UTC (`0 30 8 1 * *`)
 
+### Client Conversion Pipeline
+- **Data Preparation:** 1st of month, 8:00 AM UTC (`0 0 8 1 * *`)
+- **Model Training:** 1st of month, 8:30 AM UTC (`0 30 8 1 * *`)
+
 ---
 
 ## 🚀 Deploy to Azure
@@ -111,6 +133,10 @@ func azure functionapp publish YOUR_TOPUP_FUNCTION_APP_NAME --python
 # Deploy SQL/SAL
 cd sqlsal
 func azure functionapp publish YOUR_SQLSAL_FUNCTION_APP_NAME --python
+
+# Deploy Client Conversion
+cd client_conversion
+func azure functionapp publish YOUR_CLIENT_CONVERSION_APP_NAME --python
 ```
 
 After deployment, configure database credentials in Azure Portal:
@@ -135,14 +161,38 @@ After deployment, configure database credentials in Azure Portal:
 - `dbo.sqlsal_feature_importance`
 - `dbo.sqlsal_model_metadata`
 
+### Client Conversion Pipeline
+- `dbo.client_conversion_training_dataset`
+- `dbo.client_conversion_model_predictions`
+- `dbo.client_conversion_rm_action_list`
+- `dbo.client_conversion_feature_importance`
+- `dbo.client_conversion_model_metadata`
+- `dbo.client_conversion_optuna_study`
+
 ---
 
 ## 📝 Notes
 
 - Each pipeline is **completely independent** with its own configuration
-- Both pipelines use the same database credentials but different tables
+- All three pipelines use the same database credentials but different tables
 - Each can be tested and deployed separately
 - Each has its own `requirements.txt` with pipeline-specific dependencies
+
+## 🎯 Customer Journey Coverage
+
+The three pipelines cover the complete customer lifecycle:
+
+```
+Lead → SQL 1/2 → SAL 1/2 → CLIENT → Top-Up
+         ↓            ↓         ↓
+    SQLSAL     CLIENT      TOPUP
+    Pipeline  CONVERSION  Pipeline
+               Pipeline
+```
+
+- **SQLSAL**: Identifies which SQL leads will progress to SAL
+- **Client Conversion**: Predicts which SAL prospects will become clients
+- **Top-Up**: Predicts which existing clients will increase investment
 
 ---
 
@@ -159,6 +209,6 @@ After deployment, configure database credentials in Azure Portal:
 
 - See `topup/README.md` for Top-Up pipeline details
 - See `sqlsal/README.md` for SQL/SAL pipeline details
-- See `sqlsal/SQLSAL 1.ipynb` for original notebook reference
+- See `client_conversion/README.md` for Client Conversion pipeline details
 
 ---

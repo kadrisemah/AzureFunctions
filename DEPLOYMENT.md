@@ -80,6 +80,12 @@ cd topup
 cd sqlsal
 ```
 
+#### Option C: Client Conversion Pipeline
+
+```bash
+cd client_conversion
+```
+
 ### 3. Set Up Python Environment
 
 ```bash
@@ -256,6 +262,10 @@ jobs:
           package: ./topup
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
 ```
+
+Similarly, create `.github/workflows/deploy-sqlsal.yml` and `.github/workflows/deploy-client-conversion.yml` for the other pipelines, adjusting the paths:
+- SQLSAL: `paths: - 'sqlsal/**'` and `package: ./sqlsal`
+- Client Conversion: `paths: - 'client_conversion/**'` and `package: ./client_conversion`
 
 ---
 

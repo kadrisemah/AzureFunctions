@@ -4,7 +4,7 @@
 
 ## 🎯 Choose Your Pipeline
 
-This project contains **two independent ML pipelines**:
+This project contains **three independent ML pipelines**:
 
 ### 1. **Top-Up Prediction** (`topup/`)
 - Predicts client top-up probability
@@ -15,6 +15,11 @@ This project contains **two independent ML pipelines**:
 - Scores SQL/SAL prospects with ML + NLP
 - Monthly execution (1st of month, 8:00 AM & 8:30 AM)
 - ~45-60 minutes total runtime
+
+### 3. **Client Conversion Prediction** (`client_conversion/`)
+- Predicts SAL → Client conversion probability
+- Monthly execution (1st of month, 8:00 AM & 8:30 AM)
+- ~40-60 minutes total runtime
 
 ---
 
@@ -86,6 +91,32 @@ Invoke-RestMethod -Uri http://localhost:7071/admin/functions/sqlsal_model_traini
 
 ---
 
+### Option C: Client Conversion Pipeline
+
+```bash
+# 1. Navigate to client_conversion folder
+cd client_conversion
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Configure credentials
+cp local.settings.json.template local.settings.json
+# Edit local.settings.json with your database credentials
+
+# 4. Start Azurite (Terminal 1)
+azurite
+
+# 5. Start Functions (Terminal 2)
+func start
+
+# 6. Trigger functions (Terminal 3 - PowerShell)
+Invoke-RestMethod -Uri http://localhost:7071/admin/functions/client_conversion_data_preparation -Method POST -ContentType "application/json" -Body "{}"
+Invoke-RestMethod -Uri http://localhost:7071/admin/functions/client_conversion_model_training -Method POST -ContentType "application/json" -Body "{}"
+```
+
+---
+
 ## ☁️ Azure Deployment (Quick)
 
 ### First-Time Setup
@@ -128,6 +159,13 @@ cd sqlsal
 func azure functionapp publish $FUNCTION_APP_NAME --python
 ```
 
+### Deploy Client Conversion Pipeline
+
+```bash
+cd client_conversion
+func azure functionapp publish $FUNCTION_APP_NAME --python
+```
+
 ### Configure Credentials
 
 ```bash
@@ -162,6 +200,14 @@ az functionapp config appsettings set \
 - `dbo.sqlsal_feature_importance` (~50-100 rows)
 - `dbo.sqlsal_model_metadata` (1 row per run)
 
+### Client Conversion Pipeline Creates:
+- `dbo.client_conversion_training_dataset` (~2,800 rows)
+- `dbo.client_conversion_model_predictions` (~2,800 rows)
+- `dbo.client_conversion_rm_action_list` (~500-1,000 rows)
+- `dbo.client_conversion_feature_importance` (~300 rows)
+- `dbo.client_conversion_model_metadata` (1 row per run)
+- `dbo.client_conversion_optuna_study` (50 rows per run)
+
 ---
 
 ## ⏱️ Execution Times
@@ -170,6 +216,7 @@ az functionapp config appsettings set \
 |----------|-----------|----------------|-------|
 | **Top-Up** | ~10 min | ~20 min | ~30 min |
 | **SQL/SAL** | ~15-20 min | ~30-40 min | ~45-60 min |
+| **Client Conversion** | ~20-30 min | ~20-30 min | ~40-60 min |
 
 ---
 
@@ -208,6 +255,7 @@ azurite
 - **Pipeline Details:**
   - Top-Up: [topup/README.md](topup/README.md)
   - SQL/SAL: [sqlsal/README.md](sqlsal/README.md)
+  - Client Conversion: [client_conversion/README.md](client_conversion/README.md)
 
 ---
 
