@@ -1,46 +1,169 @@
-# Azure Functions
+# ========================================
+# Azure Functions - ML Pipelines
+# ========================================
+
+# ===== CRITICAL SECURITY =====
+# NEVER commit credentials or secrets
 local.settings.json
-.python_packages/
+*.env
+.env
+secrets/
+credentials/
+*.key
+*.pem
+
+# ===== Azure Functions Runtime =====
+# Local storage emulator data
+__blobstorage__/
+__queuestorage__/
+__azurite_db*.json
+*.azurite
+AzuriteConfig
+
+# Azure Functions Core Tools
+bin/
+obj/
+.azure/
+appsettings.json
+
+# ===== Python =====
+# Byte-compiled / optimized
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
-bin/
-obj/
 
-# Virtual Environment
+# Virtual environments
+.venv/
 venv/
-env/
 ENV/
+env/
+.virtualenv/
 
-# IDE
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ===== ML Model Artifacts =====
+# CatBoost models
+*.cbm
+catboost_info/
+
+# Other model formats
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.hdf5
+*.pt
+*.pth
+
+# Training logs
+logs/
+*.log
+tensorboard/
+runs/
+
+# ===== Data Files =====
+# Large data files (should be in cloud storage)
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.feather
+data/
+datasets/
+*.db
+*.sqlite
+*.sqlite3
+
+# ===== IDE / Editors =====
+# VS Code
 .vscode/
+*.code-workspace
+
+# PyCharm
 .idea/
+*.iml
+
+# Jupyter
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# Spyder
+.spyderproject
+.spyproject
+
+# ===== OS Files =====
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+
+# ===== Temporary Files =====
+*.tmp
+*.temp
 *.swp
 *.swo
 *~
+.cache/
 
-# OS
-.DS_Store
-Thumbs.db
+# ===== Documentation Build =====
+docs/_build/
+site/
 
-# Logs
-*.log
+# ===== Project Specific =====
+# Keep but don't track local copies
+local_testing/
+scratch/
+experiments/
+playground/
 
-# Azure
-.azure/
+# ===== ALLOW THESE (Exceptions) =====
+# Configuration templates (safe to commit)
+!local.settings.json.template
+!*.template
+!.gitkeep
 
-# Temporary files
-*.tmp
-*.temp
-.azurite/
-
-# Azurite Storage Emulator
-__azurite_db_*.json
-__blobstorage__/
-AzuriteConfig
-
-# CatBoost Training Logs
-catboost_info/
-*.cbm
+# Documentation notebooks (reference only)
+!SQLSAL*.ipynb

@@ -1,0 +1,15 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "SOURCE_SERVER": "your-server.database.windows.net",
+    "SOURCE_DATABASE": "your-database",
+    "SOURCE_USER": "your-username",
+    "SOURCE_PASSWORD": "your-password",
+    "TARGET_SERVER": "your-target-server.database.windows.net",
+    "TARGET_DATABASE": "your-target-database",
+    "TARGET_USER": "your-target-username",
+    "TARGET_PASSWORD": "your-target-password"
+  }
+}

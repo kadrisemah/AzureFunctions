@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Azure Functions artifacts
+bin/
+obj/
+appsettings.json
+local.settings.json
+
+# Python Tools for Visual Studio (PTVS)
+.vscode/
+.venv/
+venv/
+ENV/
+
+# Azure Functions Core Tools
+__blobstorage__/
+__queuestorage__/
+__azurite_db*__.json
+
+# Model files
+*.cbm
+*.pkl
+*.joblib
+
+# Log files
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Notebook checkpoints
+.ipynb_checkpoints/
