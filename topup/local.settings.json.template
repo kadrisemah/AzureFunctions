@@ -3,13 +3,15 @@
   "Values": {
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "python",
-    "SOURCE_SERVER": "your-server.database.windows.net",
-    "SOURCE_DATABASE": "your-database",
-    "SOURCE_USER": "your-username",
-    "SOURCE_PASSWORD": "your-password",
     "TARGET_SERVER": "your-target-server.database.windows.net",
     "TARGET_DATABASE": "your-target-database",
     "TARGET_USER": "your-target-username",
-    "TARGET_PASSWORD": "your-target-password"
+    "TARGET_PASSWORD": "your-target-password",
+    "PRIMEAI_SERVER": "tfo-az-prod-dbsr01.database.windows.net",
+    "PRIMEAI_DATABASE": "sqldb-tfo-primeai-prod",
+    "PRIMEAI_USER": "aiprime",
+    "PRIMEAI_PASSWORD": "your-primeai-password",
+    "AZURE_OPENAI_ENDPOINT": "https://eastusipms.cognitiveservices.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-08-01-preview",
+    "AZURE_OPENAI_KEY": "your-azure-openai-api-key"
   }
 }
