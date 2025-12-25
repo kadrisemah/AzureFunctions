@@ -2,7 +2,7 @@ import logging
 import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine, inspect, Table, Column, MetaData, text
-from sqlalchemy.types import Integer, Float, String, DateTime, Boolean, NVARCHAR
+from sqlalchemy.types import Integer, BigInteger, Float, String, DateTime, Boolean, NVARCHAR
 from urllib.parse import quote_plus
 from datetime import datetime, timedelta
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -11,10 +11,47 @@ from sklearn.preprocessing import normalize
 import re
 import warnings
 import os
+import unicodedata
 import azure.functions as func
+
+# NLTK imports for advanced text preprocessing
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+
+# Sentence-BERT for semantic embeddings
+from sentence_transformers import SentenceTransformer
 
 warnings.filterwarnings('ignore')
 pd.options.mode.chained_assignment = None
+
+# Download NLTK data
+try:
+    nltk.download('stopwords', quiet=True)
+    nltk.download('wordnet', quiet=True)
+    nltk.download('omw-1.4', quiet=True)
+except:
+    logging.warning('NLTK download failed, will retry during execution')
+
+# Initialize NLTK components
+stop_words = set(stopwords.words('english'))
+lemmatizer = WordNetLemmatizer()
+
+# Initialize Sentence-BERT model (lazy loading)
+_sbert_model = None
+
+def get_sbert_model():
+    """Lazy load Sentence-BERT model"""
+    global _sbert_model
+    if _sbert_model is None:
+        try:
+            logging.info('Loading Sentence-BERT model (all-MiniLM-L6-v2)...')
+            _sbert_model = SentenceTransformer('all-MiniLM-L6-v2')
+            logging.info('Sentence-BERT model loaded successfully')
+        except Exception as e:
+            logging.warning(f'Failed to load SBERT model: {e}. Falling back to TF-IDF only.')
+            _sbert_model = None
+    return _sbert_model
 
 
 def create_db_connection(server, database, username, password):
@@ -33,6 +70,13 @@ def infer_sqlalchemy_type(dtype, column_name=None, series=None):
     if 'datetime' in dtype_str:
         return DateTime
     if dtype_str.startswith('int'):
+        # Check if values exceed INT max (2,147,483,647) - use BIGINT if needed
+        if series is not None:
+            max_val = series.max()
+            min_val = series.min()
+            if pd.notna(max_val) and pd.notna(min_val):
+                if max_val > 2147483647 or min_val < -2147483648:
+                    return BigInteger
         return Integer
     if dtype_str.startswith('float'):
         return Float
@@ -76,6 +120,13 @@ def create_table_dynamically(df, engine, schema, table_name):
 def save_to_sql_database(df, engine, schema, table_name):
     """Save DataFrame to SQL database"""
     df.columns = [col.replace(' ', '_').replace('-', '_') for col in df.columns]
+
+    # Remove duplicate columns (case-insensitive) - SQL Server is case-insensitive
+    original_cols = len(df.columns)
+    df = df.loc[:, ~df.columns.str.lower().duplicated()]
+    if len(df.columns) < original_cols:
+        logging.info(f'[save_to_sql] Removed {original_cols - len(df.columns)} duplicate columns')
+
     for col in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[col]):
             df[col] = pd.to_datetime(df[col]).dt.tz_localize(None)
@@ -89,15 +140,46 @@ def save_to_sql_database(df, engine, schema, table_name):
         chunk.to_sql(name=table_name, con=engine, schema=schema, if_exists='append', index=False, method=None)
 
 
+# Contractions dictionary for text normalization
+_contractions = {
+    "can't": "cannot",
+    "won't": "will not",
+    "n't": " not",
+    "'re": " are",
+    "'s": " is",
+    "'ll": " will",
+    "'d": " would",
+    "'ve": " have",
+    "'m": " am"
+}
+
+def expand_contractions(text):
+    """Expand contractions in text"""
+    for c, r in _contractions.items():
+        text = re.sub(c, r, text, flags=re.IGNORECASE)
+    return text
+
 def clean_text(text, min_len=2):
-    """Clean and normalize text for NLP processing"""
-    if pd.isna(text) or text == '':
-        return ''
-    text = str(text)
-    text = re.sub(r'\s+', ' ', text)
-    text = re.sub(r'[^\w\s.,!?-]', '', text)
-    text = text.lower().strip()
-    return text if len(text) >= min_len else ''
+    """Clean and normalize text for NLP processing with NLTK"""
+    if pd.isna(text):
+        return ""
+    # Normalize unicode
+    text = unicodedata.normalize("NFKC", str(text))
+    # Remove html tags
+    text = re.sub(r"<[^>]+>", " ", text)
+    # Remove URLs and emails
+    text = re.sub(r"https?://\S+|www\.\S+", " ", text)
+    text = re.sub(r"\S+@\S+", " ", text)
+    # Expand contractions
+    text = expand_contractions(text)
+    # Remove non-alpha (keep spaces)
+    text = re.sub(r"[^a-zA-Z0-9\s\-]", " ", text)
+    # Collapse whitespace and lowercase
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    # Tokenise, remove stopwords, lemmatize
+    tokens = [t for t in text.split() if t not in stop_words]
+    tokens = [lemmatizer.lemmatize(t) for t in tokens if len(t) >= min_len]
+    return " ".join(tokens)
 
 
 def map_utm_campaign_first_touch(x):
@@ -169,9 +251,18 @@ def preprocess_contact_data(df):
         df['Nationality'] = df['Nationality'].astype(str).str.lower().str.strip()
         nationality_mappings = {
             'saudi': 'saudi arabia', 'saudi arabian': 'saudi arabia', 'sa': 'saudi arabia',
+            'saudi araboa': 'saudi arabia', 'saudi rabia': 'saudi arabia',
+            'sudi': 'saudi arabia', 'saudi_arabian': 'saudi arabia',
+            'ksa': 'saudi arabia', 'ٍsaudi': 'saudi arabia', 'ٍsa': 'saudi arabia',
+            'sdudi': 'saudi arabia',
             'bahraini': 'bahrain', 'bahrein': 'bahrain'
         }
         df['Nationality'] = df['Nationality'].replace(nationality_mappings)
+
+        # Create binary nationality columns (top 3)
+        df['Nationality_bahrain'] = df['Nationality'].str.contains('bahrain', case=False, na=False).astype(int)
+        df['Nationality_indian'] = df['Nationality'].str.contains('indian', case=False, na=False).astype(int)
+        df['Nationality_saudi arabia'] = df['Nationality'].str.contains('saudi arabia', case=False, na=False).astype(int)
 
     # Step 3: One-hot encoding
     columns_to_encode = [
@@ -266,18 +357,31 @@ def process_meetings_data(meetings_df, valid_hubspot_ids):
         meetings_df['MeetingNotes_clean'] = meetings_df['MeetingNotesPreview'].apply(clean_text)
         meetings_df['HasNotes'] = meetings_df['MeetingNotes_clean'].str.strip().astype(bool)
 
-        # TF-IDF vectorization for clustering
+        # TF-IDF vectorization (as fallback)
         notes_with_content = meetings_df[meetings_df['HasNotes']]
         if len(notes_with_content) > 10:
             try:
-                tfidf_vectorizer = TfidfVectorizer(max_features=5000, min_df=5, max_df=0.9, ngram_range=(1,2))
-                tfidf_matrix = tfidf_vectorizer.fit_transform(notes_with_content['MeetingNotes_clean'])
-                tfidf_matrix = normalize(tfidf_matrix)
+                # Try Sentence-BERT embeddings first (better semantic representation)
+                sbert_model = get_sbert_model()
+                if sbert_model is not None:
+                    logging.info('Generating Sentence-BERT embeddings for meeting notes...')
+                    embeddings = sbert_model.encode(
+                        notes_with_content['MeetingNotes_clean'].tolist(),
+                        show_progress_bar=False,
+                        convert_to_numpy=True
+                    )
+                    logging.info(f'SBERT embeddings generated: shape {embeddings.shape}')
+                else:
+                    # Fallback to TF-IDF if SBERT unavailable
+                    logging.info('Using TF-IDF embeddings (SBERT not available)')
+                    tfidf_vectorizer = TfidfVectorizer(max_features=5000, min_df=5, max_df=0.9, ngram_range=(1,2))
+                    tfidf_matrix = tfidf_vectorizer.fit_transform(notes_with_content['MeetingNotes_clean'])
+                    embeddings = normalize(tfidf_matrix).toarray()
 
                 # Clustering
                 n_clusters = 3
                 cluster_model = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=1024)
-                cluster_labels = cluster_model.fit_predict(tfidf_matrix)
+                cluster_labels = cluster_model.fit_predict(embeddings)
                 meetings_df.loc[notes_with_content.index, 'NoteSegment'] = cluster_labels
 
                 # Segment counts per contact
@@ -316,6 +420,32 @@ def process_meetings_data(meetings_df, valid_hubspot_ids):
         for i in range(3):
             pivot_meetings_df[f'SegmentCount_{i}'] = 0
 
+    # Get top 5 most recent meeting notes per contact (representative notes)
+    if 'MeetingNotesPreview' in meetings_df.columns and 'ActivityDate' in meetings_df.columns:
+        meetings_df_sorted = meetings_df.sort_values(by=['HubSpotId', 'ActivityDate'], ascending=[True, False])
+
+        def clean_text_for_llm(text):
+            """Clean text for LLM input: remove line breaks, special chars, extra spaces"""
+            if pd.isna(text):
+                return ""
+            text = re.sub(r'\s+', ' ', text)  # replace multiple whitespace/newlines
+            text = re.sub(r'[^\w\s.,!?-]', '', text)  # remove special characters
+            return text.strip()
+
+        def get_top_notes(group):
+            notes = group['MeetingNotesPreview'].dropna().head(5).apply(clean_text_for_llm)
+            return '\n\n'.join(notes)
+
+        top_notes_df = (
+            meetings_df_sorted
+            .groupby('HubSpotId', as_index=False)
+            .apply(get_top_notes)
+        )
+        top_notes_df.columns = ['HubSpotId', 'TopSegmentRepresentative']
+
+        # Merge to pivot_meetings_df
+        pivot_meetings_df = pivot_meetings_df.merge(top_notes_df, on='HubSpotId', how='left')
+
     logging.info(f'Meetings processed: {len(pivot_meetings_df)} unique contacts')
     return pivot_meetings_df
 
@@ -340,6 +470,40 @@ def process_calls_data(calls_df, valid_hubspot_ids):
         calls_df['CallNotes_clean'] = calls_df['CallNotesPreview'].apply(clean_text)
         calls_df['HasCallNotes'] = calls_df['CallNotes_clean'].str.strip().astype(bool)
 
+        # Clustering for call notes (same as meetings)
+        calls_with_notes = calls_df[calls_df['HasCallNotes']]
+        if len(calls_with_notes) > 10:
+            try:
+                # Try Sentence-BERT embeddings first
+                sbert_model = get_sbert_model()
+                if sbert_model is not None:
+                    logging.info('Generating Sentence-BERT embeddings for call notes...')
+                    embeddings_calls = sbert_model.encode(
+                        calls_with_notes['CallNotes_clean'].tolist(),
+                        show_progress_bar=False,
+                        convert_to_numpy=True
+                    )
+                    logging.info(f'SBERT call embeddings generated: shape {embeddings_calls.shape}')
+                else:
+                    # Fallback to TF-IDF
+                    logging.info('Using TF-IDF embeddings for calls (SBERT not available)')
+                    tfidf_vectorizer = TfidfVectorizer(max_features=5000, min_df=5, max_df=0.9, ngram_range=(1,2))
+                    tfidf_matrix = tfidf_vectorizer.fit_transform(calls_with_notes['CallNotes_clean'])
+                    embeddings_calls = normalize(tfidf_matrix).toarray()
+
+                # Clustering
+                n_clusters = 3
+                cluster_model = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=1024)
+                cluster_labels = cluster_model.fit_predict(embeddings_calls)
+                calls_df.loc[calls_with_notes.index, 'CallNoteSegment'] = cluster_labels
+            except Exception as e:
+                logging.warning(f'Call clustering failed: {e}')
+                calls_df['CallNoteSegment'] = -1
+        else:
+            calls_df['CallNoteSegment'] = -1
+    else:
+        calls_df['CallNoteSegment'] = -1
+
     # Aggregation
     agg_dict = {}
     if 'callDisposition' in calls_df.columns:
@@ -353,8 +517,105 @@ def process_calls_data(calls_df, valid_hubspot_ids):
         pivot_calls_df['CallAttempts'] = 0
         pivot_calls_df['ConnectedCalls'] = 0
 
+    # Get top 5 most recent call notes per contact (representative notes)
+    if 'CallNotes_clean' in calls_df.columns and 'ActivityDate' in calls_df.columns:
+        calls_df_sorted = calls_df.sort_values(by=['HubSpotId', 'ActivityDate'], ascending=[True, False])
+
+        def clean_text_for_llm(text):
+            """Clean text for LLM input: remove line breaks, special chars, extra spaces"""
+            if pd.isna(text):
+                return ""
+            text = re.sub(r'\s+', ' ', text)  # replace multiple whitespace/newlines
+            text = re.sub(r'[^\w\s.,!?-]', '', text)  # remove special characters
+            return text.strip()
+
+        def get_top_notes(group):
+            notes = group['CallNotes_clean'].dropna().head(5).apply(clean_text_for_llm)
+            return '\n\n'.join(notes)
+
+        top_notes_df = (
+            calls_df_sorted
+            .groupby('HubSpotId', as_index=False)
+            .apply(get_top_notes)
+        )
+        top_notes_df.columns = ['HubSpotId', 'TopSegmentRepresentativeCalls']
+
+        # Merge to pivot_calls_df
+        pivot_calls_df = pivot_calls_df.merge(top_notes_df, on='HubSpotId', how='left')
+
     logging.info(f'Calls processed: {len(pivot_calls_df)} unique contacts')
     return pivot_calls_df
+
+
+def filter_high_missing_data(df):
+    """Filter out contacts with 80%+ missing categorical features"""
+    logging.info('Filtering contacts with high missing data...')
+
+    columns_grouped = {
+        'one_hot_encoded': {
+            'age_range': ['age_range_below_21', 'age_range_21_30', 'age_range_31_40',
+                          'age_range_41_50', 'age_range_51_60', 'age_range_over_60'],
+            'MaritalStatus': ['MaritalStatus_Divorced', 'MaritalStatus_Institution',
+                              'MaritalStatus_Married', 'MaritalStatus_Single'],
+            'Gender': ['Gender_Female', 'Gender_Institution', 'Gender_Male'],
+            'CampaignType': ['CampaignType_Awareness', 'CampaignType_Lead Gen'],
+            'PreferredLanguage': ['PreferredLanguage_Arabic', 'PreferredLanguage_English'],
+            'UTMCampaignFirstTouch': ['UTMCampaignFirstTouch_aos', 'UTMCampaignFirstTouch_argaam',
+                                      'UTMCampaignFirstTouch_club', 'UTMCampaignFirstTouch_direct traffic',
+                                      'UTMCampaignFirstTouch_diverse', 'UTMCampaignFirstTouch_lookalike',
+                                      'UTMCampaignFirstTouch_organic', 'UTMCampaignFirstTouch_osol',
+                                      'UTMCampaignFirstTouch_others', 'UTMCampaignFirstTouch_professional',
+                                      'UTMCampaignFirstTouch_retire'],
+            'UTMSourceFirstTouch': ['UTMSourceFirstTouch_Argaam', 'UTMSourceFirstTouch_Client App',
+                                    'UTMSourceFirstTouch_Direct traffic', 'UTMSourceFirstTouch_Email Marketing',
+                                    'UTMSourceFirstTouch_Facebook', 'UTMSourceFirstTouch_GDN',
+                                    'UTMSourceFirstTouch_GMB', 'UTMSourceFirstTouch_Instagram',
+                                    'UTMSourceFirstTouch_Integration', 'UTMSourceFirstTouch_Linkedin',
+                                    'UTMSourceFirstTouch_Offline (import)', 'UTMSourceFirstTouch_Offline (sales contacts)',
+                                    'UTMSourceFirstTouch_Old Webinar (Integration)', 'UTMSourceFirstTouch_Organic',
+                                    'UTMSourceFirstTouch_Referrals', 'UTMSourceFirstTouch_Scheduler App',
+                                    'UTMSourceFirstTouch_Search', 'UTMSourceFirstTouch_Snapchat',
+                                    'UTMSourceFirstTouch_Social media (organic)', 'UTMSourceFirstTouch_Twitter',
+                                    'UTMSourceFirstTouch_Whatsapp', 'UTMSourceFirstTouch_tfo-website'],
+            'Country': ['Country_Bahrain', 'Country_Kuwait', 'Country_Other',
+                        'Country_Saudi Arabia', 'Country_United Arab Emirates'],
+            'FirstPageSeen': ['FirstPageSeen_Facebook', 'FirstPageSeen_Other',
+                              'FirstPageSeen_PJ', 'FirstPageSeen_Website', 'FirstPageSeen_linkedin'],
+            'Nationality': ['Nationality_bahrain', 'Nationality_indian', 'Nationality_saudi arabia'],
+        }
+    }
+
+    # Check for missing values (one-hot encoded groups)
+    missing_values_df = pd.DataFrame(index=df.index)
+
+    # Missing in one-hot groups (all columns in a group are 0 = missing)
+    for group_name, group_columns in columns_grouped['one_hot_encoded'].items():
+        # Filter to only existing columns
+        existing_cols = [col for col in group_columns if col in df.columns]
+        if existing_cols:
+            missing_values_df[group_name] = (df[existing_cols].sum(axis=1) == 0)
+        else:
+            # If no columns exist, assume not missing
+            missing_values_df[group_name] = False
+
+    # Calculate the percentage of missing values for each row
+    missing_percentage = missing_values_df.mean(axis=1)
+
+    # Filter rows with 80% or more missing values
+    high_missing_condition = missing_percentage >= 0.8
+
+    # Create a new DataFrame with the filtered rows
+    high_missing_data = df[high_missing_condition]
+
+    # Creating high_missing_ids list
+    if 'HubSpotId' in df.columns:
+        high_missing_ids = high_missing_data['HubSpotId'].to_list()
+    else:
+        high_missing_ids = high_missing_data.index.to_list()
+
+    logging.info(f'Found {len(high_missing_ids)} contacts with 80%+ missing categorical features')
+
+    return high_missing_data, high_missing_ids
 
 
 def main(mytimer: func.TimerRequest) -> None:
@@ -432,12 +693,22 @@ def main(mytimer: func.TimerRequest) -> None:
         "WhatAreYourGoalsForThisInvestmentOtherDetails", "AreYouAnAccreditedInvestor",
         "PayInInstallments", "NumberofPageViews", "OriginalSource", "LastPageSeen",
         "ReasonForDisqualification", "RecentSalesEmailOpenedDate",
-        "RecentSalesEmailClickedDate", "OtherCommentPA", "OtherCommentsRM"
+        "RecentSalesEmailClickedDate", "OtherCommentPA", "OtherCommentsRM",
+        "AreYouAQualifiedInvestorExecutionFlow", "LastContacted",
+        "DoesTheEmaiLookReal", "CouldTheLeadBeaRelevantClientForDFOOrTFO",
+        "ClearOutPhoneCountryName", "RetailClient"
     ]
     existing_drop_cols = [col for col in columns_to_drop if col in processed_df.columns]
     if existing_drop_cols:
         processed_df = processed_df.drop(columns=existing_drop_cols)
         logging.info(f'Dropped {len(existing_drop_cols)} unnecessary columns')
+
+    # Final column drops (before creating final dataset)
+    final_drops = ["DAYSTOCLOSE", "ValidFrom", "ValidUntil", "ContactOwnerId"]
+    existing_final_drops = [col for col in final_drops if col in processed_df.columns]
+    if existing_final_drops:
+        processed_df = processed_df.drop(columns=existing_final_drops)
+        logging.info(f'Dropped {len(existing_final_drops)} final columns')
 
     # Filter out 'Lead' stage
     if 'LeadStageNewCEO' in processed_df.columns:
@@ -467,6 +738,12 @@ def main(mytimer: func.TimerRequest) -> None:
             if col in processed_df.columns:
                 processed_df[col] = processed_df[col].fillna(0).round().astype(int)
 
+    # Filter out contacts with high missing data (80%+ missing categorical features)
+    high_missing_data, high_missing_ids = filter_high_missing_data(processed_df)
+    if high_missing_ids:
+        processed_df = processed_df[~processed_df['HubSpotId'].isin(high_missing_ids)]
+        logging.info(f'Removed {len(high_missing_ids)} contacts with high missing data')
+
     # Add metadata
     processed_df['created_at'] = datetime.now()
     processed_df['pipeline_run_id'] = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -475,6 +752,12 @@ def main(mytimer: func.TimerRequest) -> None:
     logging.info(f'Unique contacts: {processed_df["HubSpotId"].nunique()}')
     if 'Target' in processed_df.columns:
         logging.info(f'Target distribution: {processed_df["Target"].value_counts().to_dict()}')
+
+    # Remove duplicate columns (case-insensitive) - SQL Server column names are case-insensitive
+    original_cols = len(processed_df.columns)
+    processed_df = processed_df.loc[:, ~processed_df.columns.str.lower().duplicated()]
+    if len(processed_df.columns) < original_cols:
+        logging.info(f'Removed {original_cols - len(processed_df.columns)} duplicate columns (case-insensitive)')
 
     # Save to SQL database
     save_to_sql_database(processed_df, target_engine, OUTPUT_SCHEMA, OUTPUT_TABLE)

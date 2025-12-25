@@ -19,6 +19,15 @@ optuna==3.5.0
 
 # NLP
 nltk==3.8.1
+sentence-transformers==2.7.0
+huggingface-hub==0.23.0
+transformers==4.41.0
+
+# Explainability
+shap==0.42.1
+
+# Deep Learning (required by sentence-transformers)
+torch==2.0.1
 
 # Utilities
 python-dateutil==2.8.2

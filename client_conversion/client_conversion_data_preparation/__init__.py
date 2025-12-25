@@ -16,8 +16,26 @@ from nltk.stem import WordNetLemmatizer
 import warnings
 import os
 import azure.functions as func
+# Sentence-BERT for semantic embeddings
+from sentence_transformers import SentenceTransformer
 
 warnings.filterwarnings('ignore')
+
+# Initialize Sentence-BERT model (lazy loading)
+_sbert_model = None
+
+def get_sbert_model():
+    """Lazy load Sentence-BERT model"""
+    global _sbert_model
+    if _sbert_model is None:
+        try:
+            logging.info('Loading Sentence-BERT model (all-MiniLM-L6-v2)...')
+            _sbert_model = SentenceTransformer('all-MiniLM-L6-v2')
+            logging.info('Sentence-BERT model loaded successfully')
+        except Exception as e:
+            logging.warning(f'Failed to load SBERT model: {e}. Falling back to TF-IDF only.')
+            _sbert_model = None
+    return _sbert_model
 
 
 def _pick_sql_server_driver():
@@ -302,16 +320,22 @@ def main(mytimer: func.TimerRequest) -> None:
     meetings_df['MeetingNotes_clean'] = meetings_df['MeetingNotesPreview'].astype(str).apply(clean_text)
     meetings_df['HasNotes'] = meetings_df['MeetingNotes_clean'].str.strip().astype(bool)
 
-    # TF-IDF vectorization for meetings
-    logging.info('Performing TF-IDF vectorization on meeting notes...')
-    tfidf_vectorizer = TfidfVectorizer(
-        max_features=5000,
-        min_df=5,
-        max_df=0.9,
-        ngram_range=(1, 2)
-    )
-    tfidf_matrix = tfidf_vectorizer.fit_transform(meetings_df['MeetingNotes_clean'])
-    tfidf_matrix = normalize(tfidf_matrix)
+    # Try Sentence-BERT embeddings first (better semantic representation)
+    sbert_model = get_sbert_model()
+    if sbert_model is not None:
+        logging.info('Generating Sentence-BERT embeddings for meeting notes...')
+        embeddings = sbert_model.encode(
+            meetings_df['MeetingNotes_clean'].tolist(),
+            show_progress_bar=False,
+            convert_to_numpy=True
+        )
+        logging.info(f'SBERT embeddings generated: shape {embeddings.shape}')
+    else:
+        # Fallback to TF-IDF if SBERT unavailable
+        logging.info('Using TF-IDF embeddings (SBERT not available)')
+        tfidf_vectorizer = TfidfVectorizer(max_features=5000, min_df=5, max_df=0.9, ngram_range=(1, 2))
+        tfidf_matrix = tfidf_vectorizer.fit_transform(meetings_df['MeetingNotes_clean'])
+        embeddings = normalize(tfidf_matrix).toarray()
 
     # Add meeting features
     outcome_descriptions = {
@@ -337,7 +361,7 @@ def main(mytimer: func.TimerRequest) -> None:
     valid_indices = meetings_df[valid_notes_mask].index.tolist()
 
     cluster_model = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=3584)
-    cluster_labels = cluster_model.fit_predict(tfidf_matrix)
+    cluster_labels = cluster_model.fit_predict(embeddings)
 
     num_to_assign = min(len(cluster_labels), len(valid_indices))
     indices_to_use = valid_indices[:num_to_assign]
@@ -379,6 +403,56 @@ def main(mytimer: func.TimerRequest) -> None:
 
     pivot_meetings_df = pivot_meetings_df.merge(seg_count, on='HubSpotId', how='left').fillna(0)
 
+    # Add advanced segment features
+    logging.info('Creating advanced meeting segment features...')
+
+    # TopSegmentRepresentative and TopSegmentLabel
+    def get_top_segment(group):
+        """Get the most common segment for each contact"""
+        if 'NoteSegment' in group.columns:
+            segment_counts = group['NoteSegment'].value_counts()
+            if len(segment_counts) > 0:
+                top_segment = segment_counts.index[0]
+                return pd.Series({
+                    'TopSegmentRepresentative': int(top_segment),
+                    'TopSegmentLabel': f'Segment_{int(top_segment)}'
+                })
+        return pd.Series({'TopSegmentRepresentative': -1, 'TopSegmentLabel': 'No_Segment'})
+
+    top_segments = meetings_df.groupby('HubSpotId').apply(get_top_segment).reset_index()
+    pivot_meetings_df = pivot_meetings_df.merge(top_segments, on='HubSpotId', how='left')
+    pivot_meetings_df['TopSegmentRepresentative'] = pivot_meetings_df['TopSegmentRepresentative'].fillna(-1).astype(int)
+    pivot_meetings_df['TopSegmentLabel'] = pivot_meetings_df['TopSegmentLabel'].fillna('No_Segment')
+
+    # Sample notes from each segment (first note from each segment per contact)
+    for seg_id in [-1, 0, 1, 2]:
+        segment_notes = meetings_df[meetings_df['NoteSegment'] == seg_id].groupby('HubSpotId')['MeetingNotesPreview'].first().reset_index()
+        segment_notes.columns = ['HubSpotId', f'Segment_{seg_id}_SampleNote']
+        pivot_meetings_df = pivot_meetings_df.merge(segment_notes, on='HubSpotId', how='left')
+        pivot_meetings_df[f'Segment_{seg_id}_SampleNote'] = pivot_meetings_df[f'Segment_{seg_id}_SampleNote'].fillna('')
+
+    # Notes preview from each segment (all notes aggregated per contact)
+    for seg_id in [-1, 0, 1, 2]:
+        def aggregate_notes(group):
+            notes = group['MeetingNotesPreview'].dropna().head(10)
+            return ' | '.join(notes.astype(str))
+
+        segment_previews = meetings_df[meetings_df['NoteSegment'] == seg_id].groupby('HubSpotId').apply(aggregate_notes).reset_index()
+        segment_previews.columns = ['HubSpotId', f'Segment_{seg_id}_NotesPreview']
+        pivot_meetings_df = pivot_meetings_df.merge(segment_previews, on='HubSpotId', how='left')
+        pivot_meetings_df[f'Segment_{seg_id}_NotesPreview'] = pivot_meetings_df[f'Segment_{seg_id}_NotesPreview'].fillna('')
+
+    # Segment descriptions (based on cluster characteristics)
+    segment_descriptions = {
+        -1: 'Unclustered or insufficient notes',
+        0: 'General meeting notes - Cluster 0',
+        1: 'General meeting notes - Cluster 1',
+        2: 'General meeting notes - Cluster 2'
+    }
+
+    for seg_id in [-1, 0, 1, 2]:
+        pivot_meetings_df[f'Segment_{seg_id}_Description'] = segment_descriptions.get(seg_id, 'Unknown segment')
+
     logging.info(f'Aggregated meeting features for {len(pivot_meetings_df)} contacts')
 
     # Process calls data with NLP (similar to meetings)
@@ -393,16 +467,22 @@ def main(mytimer: func.TimerRequest) -> None:
     calls_df['CallNotes_clean'] = calls_df['CallNotesPreview'].astype(str).apply(clean_text)
     calls_df['HasCallNotes'] = calls_df['CallNotes_clean'].str.strip().astype(bool)
 
-    # TF-IDF vectorization for calls
-    logging.info('Performing TF-IDF vectorization on call notes...')
-    tfidf_vectorizer_calls = TfidfVectorizer(
-        max_features=5000,
-        min_df=5,
-        max_df=0.9,
-        ngram_range=(1, 2)
-    )
-    tfidf_matrix_calls = tfidf_vectorizer_calls.fit_transform(calls_df['CallNotes_clean'])
-    tfidf_matrix_calls = normalize(tfidf_matrix_calls)
+    # Try Sentence-BERT embeddings first (better semantic representation)
+    sbert_model = get_sbert_model()
+    if sbert_model is not None:
+        logging.info('Generating Sentence-BERT embeddings for call notes...')
+        embeddings_calls = sbert_model.encode(
+            calls_df['CallNotes_clean'].tolist(),
+            show_progress_bar=False,
+            convert_to_numpy=True
+        )
+        logging.info(f'SBERT call embeddings generated: shape {embeddings_calls.shape}')
+    else:
+        # Fallback to TF-IDF if SBERT unavailable
+        logging.info('Using TF-IDF embeddings for calls (SBERT not available)')
+        tfidf_vectorizer_calls = TfidfVectorizer(max_features=5000, min_df=5, max_df=0.9, ngram_range=(1, 2))
+        tfidf_matrix_calls = tfidf_vectorizer_calls.fit_transform(calls_df['CallNotes_clean'])
+        embeddings_calls = normalize(tfidf_matrix_calls).toarray()
 
     # Add call features
     calls_df['DaysFromCreateToActivity'] = (calls_df['ActivityDate'] - calls_df['CreateDate']).dt.days
@@ -417,7 +497,7 @@ def main(mytimer: func.TimerRequest) -> None:
     valid_call_indices = calls_df[valid_call_notes_mask].index.tolist()
 
     cluster_model_calls = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=3584)
-    cluster_labels_calls = cluster_model_calls.fit_predict(tfidf_matrix_calls)
+    cluster_labels_calls = cluster_model_calls.fit_predict(embeddings_calls)
 
     num_to_assign_calls = min(len(cluster_labels_calls), len(valid_call_indices))
     indices_to_use_calls = valid_call_indices[:num_to_assign_calls]
@@ -437,7 +517,7 @@ def main(mytimer: func.TimerRequest) -> None:
         CallAttempts=('callDisposition', 'count'),
         ConnectedCalls=('callDisposition', lambda x: (x == 'Connected').sum()),
         NoAnswerCalls=('callDisposition', lambda x: (x == 'No Answer').sum()),
-        VoicemailCalls=('callDisposition', lambda x: (x == 'Voicemail').sum()),
+        VoicemailCalls=('callDisposition', lambda x: (x == 'Left Voicemail').sum()),
         BusyCalls=('callDisposition', lambda x: (x == 'Busy').sum()),
         AvgDaysFromCreateToActivity=('DaysFromCreateToActivity', 'mean'),
         MedianDaysFromCreateToActivity=('DaysFromCreateToActivity', 'median'),
@@ -458,6 +538,56 @@ def main(mytimer: func.TimerRequest) -> None:
     ).fillna(0)
 
     pivot_calls_df = pivot_calls_df.merge(call_seg_count, on='HubSpotId', how='left').fillna(0)
+
+    # Add advanced call segment features
+    logging.info('Creating advanced call segment features...')
+
+    # TopCallSegmentId and TopCallSegmentLabel
+    def get_top_call_segment(group):
+        """Get the most common call segment for each contact"""
+        if 'CallNoteSegment' in group.columns:
+            segment_counts = group['CallNoteSegment'].value_counts()
+            if len(segment_counts) > 0:
+                top_segment = segment_counts.index[0]
+                return pd.Series({
+                    'TopCallSegmentId': int(top_segment),
+                    'TopCallSegmentLabel': f'CallSegment_{int(top_segment)}'
+                })
+        return pd.Series({'TopCallSegmentId': -1, 'TopCallSegmentLabel': 'No_CallSegment'})
+
+    top_call_segments = calls_df.groupby('HubSpotId').apply(get_top_call_segment).reset_index()
+    pivot_calls_df = pivot_calls_df.merge(top_call_segments, on='HubSpotId', how='left')
+    pivot_calls_df['TopCallSegmentId'] = pivot_calls_df['TopCallSegmentId'].fillna(-1).astype(int)
+    pivot_calls_df['TopCallSegmentLabel'] = pivot_calls_df['TopCallSegmentLabel'].fillna('No_CallSegment')
+
+    # Sample notes from each call segment (first note from each segment per contact)
+    for seg_id in [-1, 0, 1, 2]:
+        segment_notes = calls_df[calls_df['CallNoteSegment'] == seg_id].groupby('HubSpotId')['CallNotesPreview'].first().reset_index()
+        segment_notes.columns = ['HubSpotId', f'CallSegment_{seg_id}_SampleNote']
+        pivot_calls_df = pivot_calls_df.merge(segment_notes, on='HubSpotId', how='left')
+        pivot_calls_df[f'CallSegment_{seg_id}_SampleNote'] = pivot_calls_df[f'CallSegment_{seg_id}_SampleNote'].fillna('')
+
+    # Notes preview from each call segment (all notes aggregated per contact)
+    for seg_id in [-1, 0, 1, 2]:
+        def aggregate_call_notes(group):
+            notes = group['CallNotesPreview'].dropna().head(10)
+            return ' | '.join(notes.astype(str))
+
+        segment_previews = calls_df[calls_df['CallNoteSegment'] == seg_id].groupby('HubSpotId').apply(aggregate_call_notes).reset_index()
+        segment_previews.columns = ['HubSpotId', f'CallSegment_{seg_id}_NotesPreview']
+        pivot_calls_df = pivot_calls_df.merge(segment_previews, on='HubSpotId', how='left')
+        pivot_calls_df[f'CallSegment_{seg_id}_NotesPreview'] = pivot_calls_df[f'CallSegment_{seg_id}_NotesPreview'].fillna('')
+
+    # Call segment descriptions (based on cluster characteristics)
+    call_segment_descriptions = {
+        -1: 'Unclustered or insufficient call notes',
+        0: 'General call notes - Cluster 0',
+        1: 'General call notes - Cluster 1',
+        2: 'General call notes - Cluster 2'
+    }
+
+    for seg_id in [-1, 0, 1, 2]:
+        pivot_calls_df[f'CallSegment_{seg_id}_Description'] = call_segment_descriptions.get(seg_id, 'Unknown segment')
 
     logging.info(f'Aggregated call features for {len(pivot_calls_df)} contacts')
 
@@ -504,6 +634,12 @@ def main(mytimer: func.TimerRequest) -> None:
             processed_df = processed_df.drop(columns=[col])
 
     logging.info(f'Final dataset shape: {processed_df.shape}')
+
+    # Remove duplicate columns (case-insensitive) - SQL Server column names are case-insensitive
+    original_cols = len(processed_df.columns)
+    processed_df = processed_df.loc[:, ~processed_df.columns.str.lower().duplicated()]
+    if len(processed_df.columns) < original_cols:
+        logging.info(f'Removed {original_cols - len(processed_df.columns)} duplicate columns (case-insensitive)')
 
     # Save to SQL
     logging.info(f'Saving training dataset to {INPUT_SCHEMA}.{OUTPUT_TABLE}...')

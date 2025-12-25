@@ -14,6 +14,7 @@ import warnings
 import os
 import re
 import azure.functions as func
+import shap
 
 warnings.filterwarnings('ignore')
 
@@ -85,6 +86,12 @@ def prepare_features(data):
 
     # Sanitize column names
     X = sanitize_column_names(X, verbose=False)
+
+    # Remove duplicate columns after sanitization (keeps first occurrence)
+    original_cols = len(X.columns)
+    X = X.loc[:, ~X.columns.duplicated()]
+    if len(X.columns) < original_cols:
+        logging.info(f'Removed {original_cols - len(X.columns)} duplicate columns after sanitization')
 
     # Fill missing values
     X = X.fillna(0)
@@ -244,10 +251,52 @@ def main(mytimer: func.TimerRequest) -> None:
     logging.info(f'F1-Score: {f1_score(y_test, y_pred_test):.4f}')
     logging.info(f'ROC-AUC: {roc_auc_score(y_test, y_proba_test):.4f}')
 
-    # Generate predictions for all data
-    logging.info('Generating predictions for all contacts...')
-    y_proba_all = model.predict_proba(X)[:, 1]
-    y_pred_all = model.predict(X)
+    # Generate out-of-fold predictions for ALL data (prevents data leakage)
+    logging.info('Generating out-of-fold predictions for all contacts...')
+    oof_predictions = np.zeros(len(X))
+    oof_predictions_proba = np.zeros(len(X))
+    models = []  # Store all fold models
+
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
+        logging.info(f'Training Fold {fold}/5 for OOF predictions...')
+
+        X_fold_train, X_fold_val = X.iloc[train_idx], X.iloc[val_idx]
+        y_fold_train, y_fold_val = y.iloc[train_idx], y.iloc[val_idx]
+
+        # Train model on this fold with best parameters
+        fold_params = {
+            **best_params,
+            'loss_function': 'Logloss',
+            'eval_metric': 'AUC',
+            'random_seed': 42,
+            'verbose': False
+        }
+        fold_model = CatBoostClassifier(**fold_params)
+        fold_pool_train = Pool(X_fold_train, y_fold_train, cat_features=categorical_features)
+        fold_pool_val = Pool(X_fold_val, y_fold_val, cat_features=categorical_features)
+
+        fold_model.fit(fold_pool_train, eval_set=fold_pool_val, early_stopping_rounds=100, use_best_model=True, verbose=False)
+
+        # Predict on validation fold (unseen data for this model)
+        oof_predictions[val_idx] = fold_model.predict(X_fold_val)
+        oof_predictions_proba[val_idx] = fold_model.predict_proba(X_fold_val)[:, 1]
+
+        # Store model
+        models.append(fold_model)
+
+        # Fold metrics
+        fold_auc = roc_auc_score(y_fold_val, oof_predictions_proba[val_idx])
+        logging.info(f'Fold {fold} AUC: {fold_auc:.4f}')
+
+    # Overall OOF metrics
+    overall_oof_auc = roc_auc_score(y, oof_predictions_proba)
+    logging.info(f'Overall OOF ROC-AUC: {overall_oof_auc:.4f}')
+
+    # Use OOF predictions for all downstream tasks
+    y_proba_all = oof_predictions_proba
+    y_pred_all = oof_predictions
 
     # Create predictions DataFrame
     predictions_df = metadata_df.copy()
@@ -267,6 +316,32 @@ def main(mytimer: func.TimerRequest) -> None:
 
     logging.info('Top 20 Feature Importances:')
     logging.info(importance_df.head(20).to_string(index=False))
+
+    # SHAP Explainability
+    logging.info('Generating SHAP values for model explainability...')
+    try:
+        # Use TreeExplainer for CatBoost (use the first fold model)
+        explainer = shap.TreeExplainer(models[0])
+
+        # Calculate SHAP values on a sample (for performance)
+        sample_size = min(100, len(X))
+        X_sample = X.sample(n=sample_size, random_state=42)
+        shap_values = explainer.shap_values(X_sample)
+
+        # Save SHAP summary statistics
+        shap_importance = pd.DataFrame({
+            'feature': X.columns,
+            'mean_abs_shap': np.abs(shap_values).mean(axis=0)
+        }).sort_values('mean_abs_shap', ascending=False)
+
+        logging.info(f'SHAP analysis completed ({len(shap_importance)} features)')
+        logging.info('Top 10 SHAP Feature Importances:')
+        logging.info(shap_importance.head(10).to_string(index=False))
+
+    except Exception as e:
+        logging.warning(f'SHAP analysis failed: {e}')
+        # Create empty dataframe if SHAP fails
+        shap_importance = pd.DataFrame(columns=['feature', 'mean_abs_shap'])
 
     # Save model
     model_filename = f'/tmp/catboost_sqlsal_model_{datetime.now().strftime("%Y%m%d_%H%M%S")}.cbm'
@@ -303,7 +378,12 @@ def main(mytimer: func.TimerRequest) -> None:
     importance_df.to_sql('sqlsal_feature_importance', engine, schema=INPUT_SCHEMA, if_exists='replace', index=False)
     logging.info(f'Feature importance saved to {INPUT_SCHEMA}.sqlsal_feature_importance ({len(importance_df)} rows)')
 
-    # 4. Model metadata
+    # 4. SHAP importance
+    if len(shap_importance) > 0:
+        shap_importance.to_sql('sqlsal_shap_importance', engine, schema=INPUT_SCHEMA, if_exists='replace', index=False)
+        logging.info(f'SHAP importance saved to {INPUT_SCHEMA}.sqlsal_shap_importance ({len(shap_importance)} rows)')
+
+    # 5. Model metadata
     model_metadata = pd.DataFrame([{
         'model_id': datetime.now().strftime('%Y%m%d_%H%M%S'),
         'model_filename': model_filename,

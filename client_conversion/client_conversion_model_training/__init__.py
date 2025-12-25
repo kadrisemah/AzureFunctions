@@ -15,6 +15,7 @@ import pyodbc
 import warnings
 import os
 import azure.functions as func
+import shap
 
 warnings.filterwarnings('ignore')
 
@@ -309,6 +310,32 @@ def main(mytimer: func.TimerRequest) -> None:
     logging.info('Top 20 Feature Importances (Averaged Across Folds):')
     logging.info('\n' + feature_importance_avg.head(20).to_string(index=False))
 
+    # SHAP Explainability
+    logging.info('Generating SHAP values for model explainability...')
+    try:
+        # Use TreeExplainer for CatBoost (use the first fold model)
+        explainer = shap.TreeExplainer(models[0])
+
+        # Calculate SHAP values on a sample (for performance)
+        sample_size = min(100, len(X))
+        X_sample = X.sample(n=sample_size, random_state=42)
+        shap_values = explainer.shap_values(X_sample)
+
+        # Save SHAP summary statistics
+        shap_importance = pd.DataFrame({
+            'feature': X.columns,
+            'mean_abs_shap': np.abs(shap_values).mean(axis=0)
+        }).sort_values('mean_abs_shap', ascending=False)
+
+        logging.info(f'SHAP analysis completed ({len(shap_importance)} features)')
+        logging.info('Top 10 SHAP Feature Importances:')
+        logging.info('\n' + shap_importance.head(10).to_string(index=False))
+
+    except Exception as e:
+        logging.warning(f'SHAP analysis failed: {e}')
+        # Create empty dataframe if SHAP fails
+        shap_importance = pd.DataFrame(columns=['feature', 'mean_abs_shap'])
+
     # Generate action list (high probability SAL prospects)
     logging.info('Generating action list for relationship managers...')
     PROBABILITY_THRESHOLD = 0.5
@@ -341,7 +368,12 @@ def main(mytimer: func.TimerRequest) -> None:
     feature_importance_avg.to_sql('client_conversion_feature_importance', engine, schema=INPUT_SCHEMA, if_exists='replace', index=False)
     logging.info(f'Feature importance saved to {INPUT_SCHEMA}.client_conversion_feature_importance ({len(feature_importance_avg)} rows)')
 
-    # 4. Model metadata
+    # 4. SHAP importance
+    if len(shap_importance) > 0:
+        shap_importance.to_sql('client_conversion_shap_importance', engine, schema=INPUT_SCHEMA, if_exists='replace', index=False)
+        logging.info(f'SHAP importance saved to {INPUT_SCHEMA}.client_conversion_shap_importance ({len(shap_importance)} rows)')
+
+    # 5. Model metadata
     model_metadata = pd.DataFrame([{
         'model_id': datetime.now().strftime('%Y%m%d_%H%M%S'),
         'model_filename': model_filename,
