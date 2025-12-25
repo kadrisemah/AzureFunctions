@@ -169,8 +169,15 @@ def main(mytimer: func.TimerRequest) -> None:
     logging.info(f'Loaded {len(data)} rows, {len(data.columns)} columns')
 
     # Rename Client ID to HubSpotId if needed
-    if 'Client ID' in data.columns and 'HubSpotId' not in data.columns:
-        data.rename(columns={'Client ID': 'HubSpotId'}, inplace=True)
+    # Normalize client id column
+    if 'HubSpotId' not in data.columns:
+        if 'Client_ID' in data.columns:
+            data.rename(columns={'Client_ID': 'HubSpotId'}, inplace=True)
+        elif 'Client ID' in data.columns:
+            data.rename(columns={'Client ID': 'HubSpotId'}, inplace=True)
+        else:
+            raise ValueError(f'HubSpotId column missing. Columns found: {list(data.columns)}')
+
 
     logging.info(f'Unique clients: {data["HubSpotId"].nunique()}')
 

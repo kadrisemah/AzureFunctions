@@ -244,7 +244,6 @@ def main(mytimer: func.TimerRequest) -> None:
         ,[they_topped_up]
         ,[Activities per Quarter]
         ,[Hubspot_Persona]
-        ,[SegmentClass]
         ,[RM_Name]
         ,[Client Summary]
         ,[Client Empathy Map]
